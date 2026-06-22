@@ -426,6 +426,7 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
       do {
          cur = strIn[curLine] + curOff; 
          chunk = lenIn[curLine] - curOff;
+         bool lastChunk = (chunk <= 511);
          if (chunk > 511) {
             chunk = 511; // we need to compress in chunks of 511 in order to be byte-compatible with simd-compressed FSST 
          }
@@ -436,7 +437,7 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
          memcpy(buf, cur, chunk);
          buf[chunk] = (u8) symbolTable.terminator;
          cur = buf;
-         end = cur + chunk; 
+         end = buf + (lastChunk ? chunk : chunk - (Symbol::maxLength - 1));
 
          // based on symboltable stats, choose a variant that is nice to the branch predictor
          if (noSuffixOpt) {
@@ -446,7 +447,7 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
          } else {
           compressVariant(false, false);
          }
-      } while((curOff += chunk) < lenIn[curLine]);
+      } while((curOff += (size_t) (cur - buf)) < lenIn[curLine]);
       lenOut[curLine] = (size_t) (out - strOut[curLine]);
    } 
    return curLine;
@@ -598,8 +599,17 @@ extern "C" u32 fsst_import(fsst_decoder_t *decoder, u8 const *buf) {
 // runtime check for simd
 inline size_t _compressImpl(Encoder *e, size_t nlines, const size_t lenIn[], const u8 *strIn[], size_t size, u8 *output, size_t *lenOut, u8 *strOut[], bool noSuffixOpt, bool avoidBranch, int simd) {
 #ifndef NONOPT_FSST
-   if (simd && fsst_hasAVX512())
-      return compressSIMD(*e->symbolTable, e->simdbuf, nlines, lenIn, strIn, size, output, lenOut, strOut, simd);
+    if (simd && fsst_hasAVX512()) {
+        bool needsSplit = false;
+        for (size_t i = 0; i < nlines; ++i) {
+            if (lenIn[i] > 511) {
+                needsSplit = true;
+                break;
+            }
+        }
+        if (!needsSplit)
+            return compressSIMD(*e->symbolTable, e->simdbuf, nlines, lenIn, strIn, size, output, lenOut, strOut, simd);
+    }
 #endif
    (void) simd;
    return compressBulk(*e->symbolTable, nlines, lenIn, strIn, size, output, lenOut, strOut, noSuffixOpt, avoidBranch);
